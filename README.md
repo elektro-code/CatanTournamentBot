@@ -10,6 +10,13 @@ This repository provides a **Discord bot** that monitors [Colonist.io](https://c
 
 ---
 
+# Example Usage
+
+![Example of bot in use](./images/usage_example.png)
+![Game used to validate scores](./images/game_validation.png)
+
+---
+
 ## Table of Contents
 
 - [Requirements](#requirements)
