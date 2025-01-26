@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  bot:
+    build: .
+    container_name: tournament_bot
+    environment:
+      - MONGO_URI=mongodb://mongo:27017
+    depends_on:
+      - mongo
+    volumes:
+      - ./bot_logs:/app/logs
+      - type: bind
+        source: ./discord_token.txt
+        target: /app/discord_token.txt
+        read_only: true
+    # If you want to see the bot's logs in real time, you can also set "tty: true" or "stdin_open: true" here.
+  mongo:
+    image: mongo:5.0
+    container_name: mongo_db
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:

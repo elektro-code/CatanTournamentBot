@@ -8,28 +8,41 @@ import traceback
 from discord.ext import commands
 from game_monitor import ColonistMonitor, get_status
 
+# --- MongoDB Setup ---
+from pymongo import MongoClient
+
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["colonist_db"]  # choose any database name you like
+
+# Try reading the Discord token from the file
+DISCORD_TOKEN = None
+TOKEN_FILE = "discord_token.txt"
+try:
+    with open(TOKEN_FILE, "r") as f:
+        DISCORD_TOKEN = f.read().strip()
+except Exception as e:
+    print(f"Error reading token from file '{TOKEN_FILE}': {e}")
+    DISCORD_TOKEN = None
 
 # ---------------------------
 # Configuration
 # ---------------------------
 BOT_PREFIX = "!"
-MAX_HISTORY = 100  # Keep only the last 100 completed games
+MAX_HISTORY = 100  # Keep only the last 100 completed games in memory if you want
 
 # ---------------------------
-# Global Stores
+# Global Stores (Memory) [Optional]
 # ---------------------------
-# Active monitors: game_id -> { "monitor": ColonistMonitor, "channel_id": int }
 active_monitors = {}
-
-# Completed games (history): game_id -> { "results": dict, "timestamp": float, "channel_id": int }
 completed_history = {}
-recent_game_ids = []  # used to track order and keep size <= MAX_HISTORY
+recent_game_ids = []
 
 # ---------------------------
 # Bot Setup
 # ---------------------------
 intents = discord.Intents.default()
-intents.message_content = True  # Needed if you want to read message content in on_message, etc.
+intents.message_content = True
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
 
@@ -38,8 +51,8 @@ bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 # ---------------------------
 def store_completed_game(game_id: str, results: tuple, channel_id: int):
     """
-    Store completed game results in the global history.
-    Enforce that only the last MAX_HISTORY games are kept.
+    Store completed game results in the global in-memory history (optional).
+    Also store in Mongo if you want.
     """
     completed_history[game_id] = {
         "results": results,
@@ -47,17 +60,23 @@ def store_completed_game(game_id: str, results: tuple, channel_id: int):
         "channel_id": channel_id,
     }
     recent_game_ids.append(game_id)
-
     if len(recent_game_ids) > MAX_HISTORY:
-        # Remove the oldest game in the list
         oldest_id = recent_game_ids.pop(0)
         completed_history.pop(oldest_id, None)
+
+    # Optionally store final results into Mongo as well
+    db.completed_games.insert_one({
+        "game_id": game_id,
+        "results": results,
+        "timestamp": time.time(),
+        "channel_id": channel_id
+    })
 
 
 async def post_final_results(game_id: str):
     """
     Once a game ends, fetch final results from the ColonistMonitor
-    and post them to the original channel. Also store them in history.
+    and post them to the original channel.
     """
     try:
         monitor_info = active_monitors.pop(game_id, None)
@@ -67,70 +86,69 @@ async def post_final_results(game_id: str):
         channel_id = monitor_info["channel_id"]
         channel = bot.get_channel(channel_id)
         if not channel:
-            return  # Can't find channel, might have been deleted or bot lacks permissions
+            return  # Can't find channel
 
         monitor = monitor_info["monitor"]
         end_game_state = monitor.end_game_state
 
-        # If the end_game_state never populated or is None, the game might have failed
         if not end_game_state or "players" not in end_game_state:
             # Possibly a load failure or time out
-            await channel.send(f"Game **{game_id}** ended, but we couldn't retrieve final scores (timed out or error).")
+            await channel.send(f"Game **{game_id}** ended, but no final scores were retrieved.")
             store_completed_game(game_id, {}, channel_id)
             return
 
-        # Build the final results from the end_game_state
+        # Build the final results
         final_results = []
         if len(monitor.state_log) > 0:
             monitor.get_player_names(monitor.state_log[-1][1])
         for color_str, player_info in end_game_state['players'].items():
-            print(player_info)
             color_int = int(color_str)
             username = monitor.player_names.get(color_int, f"Color{color_int}")
             winner = player_info.get('winningPlayer', False)
             vps = monitor._calc_victory_points(player_info['victoryPoints'])
             final_results.append((username, vps, winner))
         
-        # Store in global history
+        # Store in global history (optional) and in DB
         store_completed_game(game_id, final_results, channel_id)
 
         # Format a response
         lines = []
         for user, vps, winner in final_results:
-            lines.append(f"{user}: {vps} points" if not winner else f"**{user}**: {vps} points")
+            if winner:
+                lines.append(f"**{user}**: {vps} points (Winner!)")
+            else:
+                lines.append(f"{user}: {vps} points")
+
         msg = f"**Game {game_id}** has ended! Final scores:\n" + "\n".join(lines)
         await channel.send(msg)
     
     except Exception as e:
         print(f"Error in post_final_results for game {game_id}: {e}")
         traceback.print_exc()
-        # Optionally send a Discord message to the channel about the error
+
 
 async def monitor_cleanup_loop():
     """
-    Background task that periodically checks if any monitored games
-    have completed. If completed, we retrieve final results and post them.
+    Background task to periodically check if any monitored games have completed.
+    If completed, post final results and remove from active monitors.
     """
     await bot.wait_until_ready()
     while not bot.is_closed():
-        # We can check which monitors have finished by checking the .monitoring flag
-        # or by simply seeing if the thread ended (ColonistMonitor sets .monitoring = False).
         ended_game_ids = []
         for gid, info in list(active_monitors.items()):
             monitor = info["monitor"]
             if not monitor.monitoring:
-                # This means the game ended or load failed. We'll collect results.
-                msg = f"**Game {gid}** has ended!"
+                # The game ended or timed out
                 channel_id = info["channel_id"]
                 channel = bot.get_channel(channel_id)
-                await channel.send(msg)
+                if channel:
+                    await channel.send(f"**Game {gid}** has ended!")
                 ended_game_ids.append(gid)
 
-        # For each ended game, post final results
         for gid in ended_game_ids:
             await post_final_results(gid)
 
-        await asyncio.sleep(5)  # Check every 5 seconds
+        await asyncio.sleep(5)
 
 
 # ---------------------------
@@ -140,9 +158,8 @@ async def monitor_cleanup_loop():
 async def watch_game(ctx, game_id: str):
     """
     Usage: !watch #<gameId>
-    Start watching a Colonist.io game in a background daemon thread.
+    Start watching a Colonist.io game in a background thread.
     """
-    # In case the user typed "!watch #ABC", we can strip the '#' if present
     if game_id.startswith("#"):
         game_id = game_id[1:]
 
@@ -150,25 +167,19 @@ async def watch_game(ctx, game_id: str):
         await ctx.send(f"Already watching game **{game_id}**.")
         return
 
-    # If game is in completed history, we also consider that "ended"
-    # but let's allow re-watch if you want. That's your choice.
-    # For simplicity, let's just say "it's in history"
     if game_id in completed_history:
-        await ctx.send(f"Game **{game_id}** is already in completed history.")
+        await ctx.send(f"Game **{game_id}** is already completed.")
         return
 
-    # Create the monitor, configure headless mode, and start it
-    monitor = ColonistMonitor()
+    monitor = ColonistMonitor(db)  # Pass the db to your monitor
     monitor.headless()
     monitor.start_driver()
     monitor.watch_game(game_id)
 
-    # Store reference
     active_monitors[game_id] = {
         "monitor": monitor,
         "channel_id": ctx.channel.id,
     }
-
     await ctx.send(f"Started watching Colonist.io game: **{game_id}**")
 
 
@@ -176,10 +187,7 @@ async def watch_game(ctx, game_id: str):
 async def game_state(ctx, game_id: str):
     """
     Usage: !gamestate #<gameId>
-    Retrieve current game state (victory points).
-    - If the game is still active, returns the latest known state.
-    - If the game has ended, returns final results from history.
-    - If not found, indicates an error.
+    Retrieve current game state or final results.
     """
     if game_id.startswith("#"):
         game_id = game_id[1:]
@@ -187,50 +195,59 @@ async def game_state(ctx, game_id: str):
     # Check active monitors first
     if game_id in active_monitors:
         monitor = active_monitors[game_id]["monitor"]
-        status = get_status(monitor)  # uses the _calculate_victory_points on the last known game_state
+        status = get_status(monitor)
         if status:
-            # Format a response
             lines = [f"**{user}**: {vps} points" for user, vps in status.items()]
             msg = f"Current victory points for **{game_id}**:\n" + "\n".join(lines)
             await ctx.send(msg)
         else:
-            await ctx.send(f"Game **{game_id}** is active, but we have no state info yet.")
+            await ctx.send(f"Game **{game_id}** is active, no state info yet.")
         return
 
-    # Check completed history
+    # Check completed history in memory
     if game_id in completed_history:
         results = completed_history[game_id]["results"]
         if not results:
             await ctx.send(f"Game **{game_id}** ended, but no final scores available.")
             return
-        # Format a response
         lines = []
         for user, vps, winner in results:
-            lines.append(f"{user}: {vps} points" if not winner else f"**{user}**: {vps} points")
-        msg = f"Final victory points for **{game_id}**:\n" + "\n".join(lines)       
+            if winner:
+                lines.append(f"**{user}**: {vps} points (Winner!)")
+            else:
+                lines.append(f"{user}: {vps} points")
+        msg = f"Final victory points for **{game_id}**:\n" + "\n".join(lines)
         await ctx.send(msg)
         return
 
-    # Otherwise, not found
-    await ctx.send(f"Game **{game_id}** is neither active nor in history.")
+    # Check DB if not in memory (optional if you want to support queries after memory is lost)
+    found_in_db = db.completed_games.find_one({"game_id": game_id})
+    if found_in_db:
+        results = found_in_db.get("results", [])
+        if not results:
+            await ctx.send(f"Game **{game_id}** ended, but no final scores available (DB).")
+            return
+        lines = []
+        for user, vps, winner in results:
+            if winner:
+                lines.append(f"**{user}**: {vps} points (Winner!)")
+            else:
+                lines.append(f"{user}: {vps} points")
+        msg = f"Final victory points for **{game_id}** (from DB):\n" + "\n".join(lines)
+        await ctx.send(msg)
+        return
+
+    await ctx.send(f"Game **{game_id}** not found in memory or DB.")
 
 
-# ---------------------------
-# Bot Events
-# ---------------------------
 @bot.event
 async def on_ready():
     print(f"Bot has logged in as {bot.user}")
-    # Start the cleanup task
     bot.loop.create_task(monitor_cleanup_loop())
 
 
-# ---------------------------
-# Main Entry
-# ---------------------------
 if __name__ == "__main__":
-    # Retrieve your bot token (recommended to store in ENV variable)
-    token = os.environ.get("DISCORD_TOKEN", "<YOUR_DISCORD_BOT_TOKEN_HERE>")
-
-    # Run the bot
-    bot.run(token)
+    if not DISCORD_TOKEN:
+        print("No token found in 'discord_token.txt'. Exiting.")
+        exit(1)
+    bot.run(DISCORD_TOKEN)

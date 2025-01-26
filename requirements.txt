@@ -1,0 +1,4 @@
+discord.py==2.1.0
+selenium-wire==5.1.0
+pymongo==4.3.3
+blinker==1.5
