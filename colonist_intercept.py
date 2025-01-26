@@ -41,6 +41,7 @@ def expose_game_data(request, response):
 
                 # Update content length
                 response.headers['Content-Length'] = str(len(response.body))
+                print('JS Intercepted...')
 
     except Exception as e:
         # Log any exceptions

@@ -66,10 +66,12 @@ class ColonistMonitor:
         Internal method to track the game. Polls ~20 times/second.
         """
         try:
-            url = f"https://colonist.io/{self.game_id}"
+            print(f'Monitoring game {self.game_id}')
+            url = f"https://colonist.io/#{self.game_id}"
             self.driver.get(url)
 
             # Wait for uiGameManager
+            print(f'Waiting for UI Manager {self.game_id}')
             defined = False
             attempts = 0
             max_attempts = 30
@@ -88,14 +90,16 @@ class ColonistMonitor:
 
             self.latest_update_time = time.time()
 
+            print(f'Getting initial state {self.game_id}')
             # Grab initial states
             prev_current_state = self.driver.execute_script("return window.uiGameManager.gameController.currentState;")
             prev_game_state = self.driver.execute_script("return window.uiGameManager.gameState;")
 
             self.player_names = self.get_player_names(prev_game_state)
             self.state_log.append((prev_current_state, prev_game_state))
+            print(f'Storing state {self.game_id}')
             self._store_game_state(prev_current_state, prev_game_state)
-
+            print(f'Starting loop {self.game_id}')
             while True:
                 curr_game_state = self.driver.execute_script("return window.uiGameManager.gameState;")
                 if curr_game_state.get('isGameOver'):

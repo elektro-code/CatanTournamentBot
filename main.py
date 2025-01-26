@@ -250,4 +250,5 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("No token found in 'discord_token.txt'. Exiting.")
         exit(1)
+    print('Starting bot...')
     bot.run(DISCORD_TOKEN)
