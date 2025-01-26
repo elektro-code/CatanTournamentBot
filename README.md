@@ -2,7 +2,8 @@
 
 This repository provides a **Discord bot** that monitors [Colonist.io](https://colonist.io/) games and reports final player scores. It uses:
 
-- **Selenium Wire** to intercept and modify Colonist's JavaScript in real-time, allowing us to observe the in-game state.
+- **Selenium Wire** to non-invasively intercept and inject passive code into Colonist's JavaScript in real-time that allows us to observe the in-game state.
+  - **NOTE**: This does not change the behaviour of Colonist's JavaScript, it only provides a window for us to look into and programmatically view the game state.
 - **Chromium** (headless mode supported) for the Selenium driver.
 - **MongoDB** for persistent storage of game states.
 - **Discord.py** to run a bot that responds to commands such as `!watch #gameId` and `!gamestate #gameId`.
