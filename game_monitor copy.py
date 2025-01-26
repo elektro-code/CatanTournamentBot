@@ -5,8 +5,8 @@ import json
 import traceback
 import threading
 
-from seleniumwire.webdriver import Chrome, ChromeOptions
-from selenium.webdriver.chrome.service import Service as ChromeService
+from seleniumwire import webdriver
+from selenium.webdriver.firefox.options import Options
 
 from colonist_intercept import expose_game_data
 
@@ -18,20 +18,17 @@ class ColonistMonitor:
         """
         self.db = db
 
-        # Initialize ChromeOptions
-        self.options = ChromeOptions()
-        # Example user-agent override (optional):
-        self.options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
-        )
-
+        self.options = Options()
+        self.options.set_preference("general.useragent.override", 
+                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0")
         self.driver = None
+
         self.monitoring = False
         self.game_id = None
         self.end_game_state = None
         self.player_names = {}
 
-        # We'll still keep an in-memory state log, but we can also store to DB
+        # We'll still keep an in-memory state log, but we'll also store to DB
         self.state_log = []
 
         self.monitor_thread = None
@@ -39,24 +36,18 @@ class ColonistMonitor:
         self.max_wait_seconds = 300  # 5 minutes
 
     def start_driver(self):
-        """Set up the Selenium Wire driver for Chrome with response interceptor."""
-        # Specify the path to chromedriver if it's not in PATH
-        service = ChromeService(executable_path='/usr/bin/chromedriver')  # Adjust if necessary
-
-        self.driver = Chrome(
-            service=service,
-            options=self.options
-        )
-        # Restrict interception to colonist .js resources:
+        """Set up the Selenium Wire driver with the appropriate options and response interceptor."""
+        self.driver = webdriver.Firefox(options=self.options)
         self.driver.scopes = [r'.*colonist\.io.*\.js(\?.*)?$']
         self.driver.response_interceptor = expose_game_data
 
     def headless(self):
         """Configure headless mode. Must be called before start_driver()."""
         if self.driver is None:
-            self.options.add_argument("--headless")
-            self.options.add_argument("--no-sandbox")
-            self.options.add_argument("--disable-gpu")
+            self.options.headless = True
+            self.options.add_argument('--headless')
+            self.options.add_argument('--no-sandbox')
+            self.options.add_argument('--disable-gpu')
 
     def watch_game(self, game_id: str):
         """
@@ -83,12 +74,10 @@ class ColonistMonitor:
             print(url)
             # Wait for uiGameManager
             print(f'Waiting for UI Manager {self.game_id}')
-
             defined = False
             attempts = 0
             max_attempts = 60
-
-            expt = None
+            print(self.driver.execute_script("return window.document;"))
             while not defined and attempts < max_attempts:
                 try:
                     self.driver.execute_script("return window.uiGameManager.gameController.currentState;")
@@ -108,18 +97,13 @@ class ColonistMonitor:
 
             print(f'Getting initial state {self.game_id}')
             # Grab initial states
-            prev_current_state = self.driver.execute_script(
-                "return window.uiGameManager.gameController.currentState;"
-            )
-            prev_game_state = self.driver.execute_script(
-                "return window.uiGameManager.gameState;"
-            )
+            prev_current_state = self.driver.execute_script("return window.uiGameManager.gameController.currentState;")
+            prev_game_state = self.driver.execute_script("return window.uiGameManager.gameState;")
 
             self.player_names = self.get_player_names(prev_game_state)
             self.state_log.append((prev_current_state, prev_game_state))
             print(f'Storing state {self.game_id}')
             self._store_game_state(prev_current_state, prev_game_state)
-
             print(f'Starting loop {self.game_id}')
             while True:
                 curr_game_state = self.driver.execute_script("return window.uiGameManager.gameState;")
@@ -129,7 +113,7 @@ class ColonistMonitor:
                     self.end_game_state = self.driver.execute_script("return window.endGameState;")
 
                     # Also store final end game state in DB
-                    if self.db and self.end_game_state is not None:
+                    if self.db and self.end_game_state:
                         self.db.game_states.insert_one({
                             "game_id": self.game_id,
                             "timestamp": time.time(),
@@ -139,9 +123,7 @@ class ColonistMonitor:
                         })
                     break
                 else:
-                    curr_current_state = self.driver.execute_script(
-                        "return window.uiGameManager.gameController.currentState;"
-                    )
+                    curr_current_state = self.driver.execute_script("return window.uiGameManager.gameController.currentState;")
                     if curr_current_state != prev_current_state:
                         # State changed => log it, store it
                         self.latest_update_time = time.time()
@@ -168,19 +150,14 @@ class ColonistMonitor:
 
     def _store_game_state(self, current_state, game_state):
         """Insert the current game state into MongoDB, if available."""
-        if self.db is not None:
-            try:
-                self.db.game_states.insert_one({
-                    "game_id": self.game_id,
-                    "timestamp": time.time(),
-                    "current_state": current_state,
-                    "game_state": game_state,
-                    "is_final": False
-                })
-                print(f"Stored game state for game_id: {self.game_id}")
-            except Exception as e:
-                print(f"Failed to insert game state into MongoDB: {e}")
-                traceback.print_exc()
+        if self.db:
+            self.db.game_states.insert_one({
+                "game_id": self.game_id,
+                "timestamp": time.time(),
+                "current_state": current_state,
+                "game_state": game_state,
+                "is_final": False
+            })
 
     def get_player_names(self, game_state: dict):
         """
